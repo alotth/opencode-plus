@@ -23,6 +23,7 @@ import { useServer } from "@/context/server"
 import { useSync } from "@/context/sync"
 import { decode64 } from "@/utils/base64"
 import { Persist, persisted } from "@/utils/persist"
+import { resolveSessionPluginUI } from "@/utils/plugin-ui"
 import { StatusPopover } from "../status-popover"
 
 const OPEN_APPS = [
@@ -246,6 +247,9 @@ export function SessionHeader() {
   const showShare = createMemo(() => shareEnabled() && !!currentSession())
   const sessionKey = createMemo(() => `${params.dir}${params.id ? "/" + params.id : ""}`)
   const view = createMemo(() => layout.view(sessionKey))
+  const tabs = createMemo(() => layout.tabs(sessionKey))
+  const pluginUI = createMemo(() => resolveSessionPluginUI(sync.data.config, projectDirectory(), globalSDK.url))
+  const webButtons = createMemo(() => pluginUI().buttons)
   const os = createMemo(() => detectOS(platform))
 
   const [exists, setExists] = createStore<Partial<Record<OpenApp, boolean>>>({
@@ -349,6 +353,11 @@ export function SessionHeader() {
     platform,
   })
 
+  const openWebTab = (tab: string) => {
+    view().reviewPanel.open()
+    void tabs().open(tab)
+  }
+
   const centerMount = createMemo(() => document.getElementById("opencode-titlebar-center"))
   const rightMount = createMemo(() => document.getElementById("opencode-titlebar-right"))
 
@@ -388,6 +397,18 @@ export function SessionHeader() {
           <Portal mount={mount()}>
             <div class="flex items-center gap-2">
               <StatusPopover />
+              <For each={webButtons()}>
+                {(button) => (
+                  <Button
+                    variant="ghost"
+                    class="hidden md:flex h-[24px] px-2 rounded-md border border-border-base bg-surface-panel text-text-strong"
+                    onClick={() => openWebTab(button.tab)}
+                    aria-label={`Open ${button.label}`}
+                  >
+                    <span class="text-12-regular">{button.label}</span>
+                  </Button>
+                )}
+              </For>
               <Show when={projectDirectory()}>
                 <div class="hidden xl:flex items-center">
                   <Show
