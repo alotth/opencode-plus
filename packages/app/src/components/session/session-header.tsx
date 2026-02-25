@@ -53,6 +53,19 @@ export function SessionHeader() {
   const showShare = createMemo(() => shareEnabled() && !!currentSession())
   const sessionKey = createMemo(() => `${params.dir}${params.id ? "/" + params.id : ""}`)
   const view = createMemo(() => layout.view(sessionKey))
+  const tabs = createMemo(() => layout.tabs(sessionKey))
+  const tasks = createMemo(() => {
+    const cmd = sync.data.command.find((item) => item.name === "tasks_roadmap")
+    if (!cmd) return
+    const value = cmd.template.trim()
+    try {
+      const url = new URL(value)
+      if (url.protocol !== "http:" && url.protocol !== "https:") return
+      return { url: url.toString(), tab: "web:tasks-roadmap" }
+    } catch {
+      return
+    }
+  })
 
   const OPEN_APPS = [
     "vscode",
@@ -289,6 +302,13 @@ export function SessionHeader() {
     platform.openLink(url)
   }
 
+  function openTasks() {
+    const item = tasks()
+    if (!item) return
+    view().reviewPanel.open()
+    void tabs().open(item.tab)
+  }
+
   const centerMount = createMemo(() => document.getElementById("opencode-titlebar-center"))
   const rightMount = createMemo(() => document.getElementById("opencode-titlebar-right"))
 
@@ -324,6 +344,16 @@ export function SessionHeader() {
           <Portal mount={mount()}>
             <div class="flex items-center gap-3">
               <StatusPopover />
+              <Show when={tasks()}>
+                <Button
+                  variant="ghost"
+                  class="hidden md:flex h-[24px] px-2 rounded-md border border-border-base bg-surface-panel text-text-strong"
+                  onClick={openTasks}
+                  aria-label="Open tasks"
+                >
+                  <span class="text-12-regular">Tasks</span>
+                </Button>
+              </Show>
               <Show when={projectDirectory()}>
                 <div class="hidden xl:flex items-center">
                   <Show

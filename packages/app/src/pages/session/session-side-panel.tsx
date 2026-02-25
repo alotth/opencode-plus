@@ -22,6 +22,15 @@ import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
 import { useSync } from "@/context/sync"
 
+type TasksRequest = {
+  type: "opencode.tasks.request"
+  requestId: string
+  action: string
+  payload?: {
+    path?: string
+  }
+}
+
 export function SessionSidePanel(props: {
   open: boolean
   reviewOpen: boolean
@@ -67,7 +76,133 @@ export function SessionSidePanel(props: {
   kinds: Map<string, "add" | "del" | "mix">
   activeDiff?: string
   focusReviewDiff: (path: string) => void
+  tasksTab: string
+  tasksUrl?: string
+  directory: string
 }) {
+  let tasksFrame: HTMLIFrameElement | undefined
+
+  const isTasksMessage = (value: unknown): value is TasksRequest => {
+    if (!value || typeof value !== "object") return false
+    if (!("type" in value) || value.type !== "opencode.tasks.request") return false
+    if (!("requestId" in value) || typeof value.requestId !== "string") return false
+    if (!("action" in value) || typeof value.action !== "string") return false
+    return true
+  }
+
+  const allowedOrigin = createMemo(() => {
+    const url = props.tasksUrl
+    if (!url) return
+    try {
+      return new URL(url).origin
+    } catch {
+      return
+    }
+  })
+
+  const postTasksResponse = (input: {
+    source: MessageEventSource | null
+    requestId: string
+    ok: boolean
+    payload?: unknown
+    error?: string
+  }) => {
+    const target = input.source
+    if (!target || typeof (target as Window).postMessage !== "function") return
+    ;(target as Window).postMessage(
+      {
+        type: "opencode.tasks.response",
+        requestId: input.requestId,
+        ok: input.ok,
+        payload: input.payload,
+        error: input.error,
+      },
+      "*",
+    )
+  }
+
+  const onTasksMessage = (event: MessageEvent) => {
+    const frame = tasksFrame?.contentWindow
+    if (!frame || event.source !== frame) return
+    const origin = allowedOrigin()
+    if (origin && event.origin !== origin) return
+    if (!isTasksMessage(event.data)) return
+
+    const request = event.data
+
+    const toFilePath = (value?: string) => {
+      if (!value) return
+      const normalized = value.trim().replace(/\\/g, "/")
+      const withoutDot = normalized.replace(/^\.\//, "")
+      if (withoutDot.startsWith("/") || /^[A-Za-z]:\//.test(withoutDot)) {
+        const root = props.directory.replace(/\\/g, "/").replace(/\/+$/, "")
+        if (withoutDot.startsWith(`${root}/`)) return withoutDot.slice(root.length + 1)
+        return
+      }
+      return withoutDot
+    }
+
+    if (request.action !== "file.read") {
+      postTasksResponse({
+        source: event.source,
+        requestId: request.requestId,
+        ok: false,
+        error: "Action not supported by host bridge",
+      })
+      return
+    }
+
+    const path = toFilePath(request.payload?.path)
+    if (!path) {
+      postTasksResponse({
+        source: event.source,
+        requestId: request.requestId,
+        ok: false,
+        error: "Missing or invalid path",
+      })
+      return
+    }
+
+    props.file
+      .load(path)
+      .then(() => {
+        const state = props.file.get(path)
+        const content = state?.content
+        if (!content) {
+          postTasksResponse({
+            source: event.source,
+            requestId: request.requestId,
+            ok: false,
+            error: `Unable to read ${path}`,
+          })
+          return
+        }
+        postTasksResponse({
+          source: event.source,
+          requestId: request.requestId,
+          ok: true,
+          payload: {
+            path,
+            content,
+          },
+        })
+      })
+      .catch((error) => {
+        postTasksResponse({
+          source: event.source,
+          requestId: request.requestId,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    return
+  }
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("message", onTasksMessage)
+    onCleanup(() => window.removeEventListener("message", onTasksMessage))
+  }
+
   return (
     <Show when={props.open}>
       <aside
@@ -136,6 +271,28 @@ export function SessionSidePanel(props: {
                             </div>
                           </Tabs.Trigger>
                         </Show>
+                        <Show when={props.tasksUrl && props.tabs().all().includes(props.tasksTab)}>
+                          <Tabs.Trigger
+                            value={props.tasksTab}
+                            closeButton={
+                              <Tooltip value={props.language.t("common.closeTab")} placement="bottom">
+                                <IconButton
+                                  icon="close-small"
+                                  variant="ghost"
+                                  class="h-5 w-5"
+                                  onClick={() => props.tabs().close(props.tasksTab)}
+                                  aria-label={props.language.t("common.closeTab")}
+                                />
+                              </Tooltip>
+                            }
+                            hideCloseButton
+                            onMiddleClick={() => props.tabs().close(props.tasksTab)}
+                          >
+                            <div class="flex items-center gap-1.5">
+                              <div>Tasks</div>
+                            </div>
+                          </Tabs.Trigger>
+                        </Show>
                         <SortableProvider ids={props.openedTabs()}>
                           <For each={props.openedTabs()}>
                             {(tab) => <SortableTab tab={tab} onTabClose={props.tabs().close} />}
@@ -193,6 +350,23 @@ export function SessionSidePanel(props: {
                               info={props.info as never}
                             />
                           </div>
+                        </Show>
+                      </Tabs.Content>
+                    </Show>
+
+                    <Show when={props.tasksUrl}>
+                      <Tabs.Content value={props.tasksTab} class="flex flex-col h-full overflow-hidden contain-strict">
+                        <Show when={props.activeTab() === props.tasksTab}>
+                          <iframe
+                            ref={(el) => {
+                              tasksFrame = el
+                            }}
+                            src={props.tasksUrl}
+                            class="h-full w-full border-0 bg-background-base"
+                            sandbox="allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin"
+                            referrerPolicy="no-referrer"
+                            title="Tasks roadmap"
+                          />
                         </Show>
                       </Tabs.Content>
                     </Show>
