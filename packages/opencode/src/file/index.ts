@@ -1,4 +1,5 @@
 import { BusEvent } from "@/bus/bus-event"
+import { Bus } from "@/bus"
 import z from "zod"
 import { $ } from "bun"
 import { formatPatch, structuredPatch } from "diff"
@@ -71,6 +72,16 @@ export namespace File {
       ref: "FileContent",
     })
   export type Content = z.infer<typeof Content>
+
+  export const Mutation = z
+    .object({
+      path: z.string(),
+      hash: z.string(),
+    })
+    .meta({
+      ref: "FileMutation",
+    })
+  export type Mutation = z.infer<typeof Mutation>
 
   const binaryExtensions = new Set([
     "exe",
@@ -552,6 +563,30 @@ export namespace File {
       }
     }
     return { type: "text", content }
+  }
+
+  export function hash(content: string) {
+    return new Bun.CryptoHasher("sha256").update(content).digest("hex")
+  }
+
+  export async function write(file: string, content: string): Promise<Mutation> {
+    using _ = log.time("write", { file })
+    const full = path.join(Instance.directory, file)
+    if (!Instance.containsPath(full)) {
+      throw new Error(`Access denied: path escapes project directory`)
+    }
+
+    const exists = await Bun.file(full).exists()
+    await fs.promises.mkdir(path.dirname(full), { recursive: true })
+    await Bun.write(full, content)
+    await Bus.publish(Event.Edited, {
+      file: full,
+    })
+
+    return {
+      path: file,
+      hash: hash(content),
+    }
   }
 
   export async function list(dir?: string) {

@@ -31,6 +31,7 @@ import { SessionComposerRegion, createSessionComposerState } from "@/pages/sessi
 import { SessionMobileTabs } from "@/pages/session/session-mobile-tabs"
 import { SessionSidePanel } from "@/pages/session/session-side-panel"
 import { useSessionHashScroll } from "@/pages/session/use-session-hash-scroll"
+import { resolveSessionPluginUI } from "@/utils/plugin-ui"
 
 export default function Page() {
   const layout = useLayout()
@@ -456,10 +457,13 @@ export default function Page() {
   }
 
   const contextOpen = createMemo(() => tabs().active() === "context" || tabs().all().includes("context"))
+  const pluginUI = createMemo(() => resolveSessionPluginUI(sync.data.config, sdk.directory, sdk.url))
+  const webTabs = createMemo(() => pluginUI().tabs)
+  const webTabKeys = createMemo(() => new Set(webTabs().map((tab) => tab.tab)))
   const openedTabs = createMemo(() =>
     tabs()
       .all()
-      .filter((tab) => tab !== "context" && tab !== "review"),
+      .filter((tab) => tab !== "context" && tab !== "review" && !webTabKeys().has(tab)),
   )
 
   const mobileChanges = createMemo(() => !isDesktop() && store.mobileTab === "changes")
@@ -726,11 +730,16 @@ export default function Page() {
   const activeTab = createMemo(() => {
     const active = tabs().active()
     if (active === "context") return "context"
+    if (active && webTabKeys().has(active)) return active
     if (active === "review" && reviewTab()) return "review"
     if (active && file.pathFromTab(active)) return normalizeTab(active)
 
     const first = openedTabs()[0]
     if (first) return first
+    const web = tabs()
+      .all()
+      .find((tab) => webTabKeys().has(tab))
+    if (web) return web
     if (contextOpen()) return "context"
     if (reviewTab() && hasReview()) return "review"
     return "empty"
@@ -762,6 +771,31 @@ export default function Page() {
       { defer: true },
     ),
   )
+
+  createEffect(() => {
+    if (!isDesktop()) return
+    if (!layout.fileTree.opened()) return
+    if (fileTreeTab() !== "all") return
+
+    const active = tabs().active()
+    if (active && active !== "review") return
+
+    const first = openedTabs()[0]
+    if (first) {
+      tabs().setActive(first)
+      return
+    }
+
+    const web = tabs()
+      .all()
+      .find((tab) => webTabKeys().has(tab))
+    if (web) {
+      tabs().setActive(web)
+      return
+    }
+
+    if (contextOpen()) tabs().setActive("context")
+  })
 
   createEffect(() => {
     const id = params.id
@@ -1154,7 +1188,13 @@ export default function Page() {
           </Show>
         </div>
 
-        <SessionSidePanel reviewPanel={reviewPanel} activeDiff={tree.activeDiff} focusReviewDiff={focusReviewDiff} />
+        <SessionSidePanel
+          reviewPanel={reviewPanel}
+          activeDiff={tree.activeDiff}
+          focusReviewDiff={focusReviewDiff}
+          webTabs={webTabs}
+          directory={sdk.directory}
+        />
       </div>
 
       <TerminalPanel />
