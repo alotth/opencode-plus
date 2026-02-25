@@ -1,4 +1,4 @@
-import { createEffect, createMemo, onCleanup, Show } from "solid-js"
+import { createEffect, createMemo, For, onCleanup, Show } from "solid-js"
 import { createStore } from "solid-js/store"
 import { Portal } from "solid-js/web"
 import { useParams } from "@solidjs/router"
@@ -24,6 +24,7 @@ import { TextField } from "@opencode-ai/ui/text-field"
 import { Keybind } from "@opencode-ai/ui/keybind"
 import { showToast } from "@opencode-ai/ui/toast"
 import { StatusPopover } from "../status-popover"
+import { resolveSessionPluginUI } from "@/utils/plugin-ui"
 
 export function SessionHeader() {
   const globalSDK = useGlobalSDK()
@@ -54,18 +55,8 @@ export function SessionHeader() {
   const sessionKey = createMemo(() => `${params.dir}${params.id ? "/" + params.id : ""}`)
   const view = createMemo(() => layout.view(sessionKey))
   const tabs = createMemo(() => layout.tabs(sessionKey))
-  const tasks = createMemo(() => {
-    const cmd = sync.data.command.find((item) => item.name === "tasks_roadmap")
-    if (!cmd) return
-    const value = cmd.template.trim()
-    try {
-      const url = new URL(value)
-      if (url.protocol !== "http:" && url.protocol !== "https:") return
-      return { url: url.toString(), tab: "web:tasks-roadmap" }
-    } catch {
-      return
-    }
-  })
+  const pluginUI = createMemo(() => resolveSessionPluginUI(sync.data.config, projectDirectory(), server.url))
+  const webButtons = createMemo(() => pluginUI().buttons)
 
   const OPEN_APPS = [
     "vscode",
@@ -302,11 +293,9 @@ export function SessionHeader() {
     platform.openLink(url)
   }
 
-  function openTasks() {
-    const item = tasks()
-    if (!item) return
+  function openWebTab(tab: string) {
     view().reviewPanel.open()
-    void tabs().open(item.tab)
+    void tabs().open(tab)
   }
 
   const centerMount = createMemo(() => document.getElementById("opencode-titlebar-center"))
@@ -344,16 +333,18 @@ export function SessionHeader() {
           <Portal mount={mount()}>
             <div class="flex items-center gap-3">
               <StatusPopover />
-              <Show when={tasks()}>
-                <Button
-                  variant="ghost"
-                  class="hidden md:flex h-[24px] px-2 rounded-md border border-border-base bg-surface-panel text-text-strong"
-                  onClick={openTasks}
-                  aria-label="Open tasks"
-                >
-                  <span class="text-12-regular">Tasks</span>
-                </Button>
-              </Show>
+              <For each={webButtons()}>
+                {(button) => (
+                  <Button
+                    variant="ghost"
+                    class="hidden md:flex h-[24px] px-2 rounded-md border border-border-base bg-surface-panel text-text-strong"
+                    onClick={() => openWebTab(button.tab)}
+                    aria-label={`Open ${button.label}`}
+                  >
+                    <span class="text-12-regular">{button.label}</span>
+                  </Button>
+                )}
+              </For>
               <Show when={projectDirectory()}>
                 <div class="hidden xl:flex items-center">
                   <Show

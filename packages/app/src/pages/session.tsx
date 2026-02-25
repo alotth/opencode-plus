@@ -58,6 +58,7 @@ import { SessionPromptDock } from "@/pages/session/session-prompt-dock"
 import { SessionMobileTabs } from "@/pages/session/session-mobile-tabs"
 import { SessionSidePanel } from "@/pages/session/session-side-panel"
 import { useSessionHashScroll } from "@/pages/session/use-session-hash-scroll"
+import { resolveSessionPluginUI } from "@/utils/plugin-ui"
 
 type HandoffSession = {
   prompt: string
@@ -65,7 +66,6 @@ type HandoffSession = {
 }
 
 const HANDOFF_MAX = 40
-const TASKS_TAB = "web:tasks-roadmap"
 
 const handoff = {
   session: new Map<string, HandoffSession>(),
@@ -883,31 +883,18 @@ export default function Page() {
   }
 
   const contextOpen = createMemo(() => tabs().active() === "context" || tabs().all().includes("context"))
-  const tasksUrl = createMemo(() => {
-    const cmd = sync.data.command.find((item) => item.name === "tasks_roadmap")
-    if (!cmd) return
-    const value = cmd.template.trim()
-    try {
-      const url = new URL(value)
-      if (url.protocol !== "http:" && url.protocol !== "https:") return
-      return url.toString()
-    } catch {
-      return
-    }
-  })
-  const tasksFrameUrl = createMemo(() => {
-    const value = tasksUrl()
-    if (!value) return
-    const url = new URL(value)
-    url.searchParams.set("directory", sdk.directory)
-    url.searchParams.set("tasksFile", "TASKS.md")
-    return url.toString()
-  })
-  const tasksOpen = createMemo(() => tabs().active() === TASKS_TAB || tabs().all().includes(TASKS_TAB))
+  const pluginUI = createMemo(() => resolveSessionPluginUI(sync.data.config, sdk.directory, sdk.url))
+  const webTabs = createMemo(() => pluginUI().tabs)
+  const webTabKeys = createMemo(() => new Set(webTabs().map((tab) => tab.tab)))
+  const webOpen = createMemo(() =>
+    tabs()
+      .all()
+      .some((tab) => webTabKeys().has(tab)),
+  )
   const openedTabs = createMemo(() =>
     tabs()
       .all()
-      .filter((tab) => tab !== "context" && tab !== "review" && tab !== TASKS_TAB),
+      .filter((tab) => tab !== "context" && tab !== "review" && !webTabKeys().has(tab)),
   )
 
   const mobileChanges = createMemo(() => !isDesktop() && store.mobileTab === "changes")
@@ -1193,13 +1180,16 @@ export default function Page() {
   const activeTab = createMemo(() => {
     const active = tabs().active()
     if (active === "context") return "context"
-    if (active === TASKS_TAB && tasksFrameUrl()) return TASKS_TAB
+    if (active && webTabKeys().has(active)) return active
     if (active === "review" && reviewTab()) return "review"
     if (active && file.pathFromTab(active)) return normalizeTab(active)
 
     const first = openedTabs()[0]
     if (first) return first
-    if (tasksOpen() && tasksFrameUrl()) return TASKS_TAB
+    const web = tabs()
+      .all()
+      .find((tab) => webTabKeys().has(tab))
+    if (web) return web
     if (contextOpen()) return "context"
     if (reviewTab() && hasReview()) return "review"
     return "empty"
@@ -1256,8 +1246,11 @@ export default function Page() {
       return
     }
 
-    if (tasksOpen() && tasksFrameUrl()) {
-      tabs().setActive(TASKS_TAB)
+    const web = tabs()
+      .all()
+      .find((tab) => webTabKeys().has(tab))
+    if (webOpen() && web) {
+      tabs().setActive(web)
       return
     }
 
@@ -1778,8 +1771,7 @@ export default function Page() {
           kinds={kinds()}
           activeDiff={tree.activeDiff}
           focusReviewDiff={focusReviewDiff}
-          tasksTab={TASKS_TAB}
-          tasksUrl={tasksFrameUrl()}
+          webTabs={webTabs}
           directory={sdk.directory}
         />
       </div>

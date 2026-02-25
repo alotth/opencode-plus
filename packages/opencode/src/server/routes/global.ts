@@ -10,6 +10,8 @@ import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
 import { Config } from "../../config/config"
 import { errors } from "../error"
+import path from "path"
+import { Global } from "@/global"
 
 const log = Log.create({ service: "server" })
 
@@ -17,6 +19,32 @@ export const GlobalDisposedEvent = BusEvent.define("global.disposed", z.object({
 
 export const GlobalRoutes = lazy(() =>
   new Hono()
+    .get("/plugin/:name/:asset{.+}", async (c) => {
+      const name = c.req.param("name")
+      const asset = c.req.param("asset")
+      const clean = asset.replace(/\\/g, "/").replace(/^\/+/, "")
+      if (!clean || clean.includes("..") || path.isAbsolute(clean)) {
+        return c.text("Invalid asset path", 400)
+      }
+
+      const roots = [path.join(Global.Path.config, "plugins", name), path.join(Global.Path.config, "plugin", name)]
+
+      for (const root of roots) {
+        const full = path.join(root, clean)
+        if (!full.startsWith(root + path.sep)) continue
+        const file = Bun.file(full)
+        if (!(await file.exists().catch(() => false))) continue
+        const type = file.type || "text/plain; charset=utf-8"
+        return new Response(file, {
+          headers: {
+            "content-type": type,
+            "cache-control": "no-store",
+          },
+        })
+      }
+
+      return c.text("Plugin asset not found", 404)
+    })
     .get(
       "/health",
       describeRoute({

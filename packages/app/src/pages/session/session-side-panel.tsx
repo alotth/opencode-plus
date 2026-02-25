@@ -21,13 +21,18 @@ import { useFile, type SelectedLineRange } from "@/context/file"
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
 import { useSync } from "@/context/sync"
+import type { PluginWebTab } from "@/utils/plugin-ui"
+import { hashText, inScopes, isAllowedOrigin, normalizeBridgePath } from "@/pages/session/webview-bridge"
 
-type TasksRequest = {
-  type: "opencode.tasks.request"
+type WebviewRequest = {
+  type: "opencode.bridge.request"
   requestId: string
-  action: string
+  action: "file.read" | "file.write"
+  token: string
   payload?: {
     path?: string
+    content?: string
+    expectedHash?: string
   }
 }
 
@@ -76,31 +81,39 @@ export function SessionSidePanel(props: {
   kinds: Map<string, "add" | "del" | "mix">
   activeDiff?: string
   focusReviewDiff: (path: string) => void
-  tasksTab: string
-  tasksUrl?: string
+  webTabs: () => PluginWebTab[]
   directory: string
 }) {
-  let tasksFrame: HTMLIFrameElement | undefined
+  const frames = new Map<string, HTMLIFrameElement>()
+  const tokens = new Map<string, string>()
 
-  const isTasksMessage = (value: unknown): value is TasksRequest => {
+  const isRequest = (value: unknown): value is WebviewRequest => {
     if (!value || typeof value !== "object") return false
-    if (!("type" in value) || value.type !== "opencode.tasks.request") return false
+    if (!("type" in value) || value.type !== "opencode.bridge.request") return false
     if (!("requestId" in value) || typeof value.requestId !== "string") return false
-    if (!("action" in value) || typeof value.action !== "string") return false
+    if (!("action" in value)) return false
+    if (value.action !== "file.read" && value.action !== "file.write") return false
+    if (!("token" in value) || typeof value.token !== "string") return false
     return true
   }
 
-  const allowedOrigin = createMemo(() => {
-    const url = props.tasksUrl
-    if (!url) return
-    try {
-      return new URL(url).origin
-    } catch {
-      return
+  const tabsByKey = createMemo(() => {
+    const map = new Map<string, PluginWebTab>()
+    for (const tab of props.webTabs()) {
+      map.set(tab.tab, tab)
     }
+    return map
   })
 
-  const postTasksResponse = (input: {
+  const tokenFor = (tab: string) => {
+    const current = tokens.get(tab)
+    if (current) return current
+    const next = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    tokens.set(tab, next)
+    return next
+  }
+
+  const postResponse = (input: {
     source: MessageEventSource | null
     requestId: string
     ok: boolean
@@ -111,7 +124,7 @@ export function SessionSidePanel(props: {
     if (!target || typeof (target as Window).postMessage !== "function") return
     ;(target as Window).postMessage(
       {
-        type: "opencode.tasks.response",
+        type: "opencode.bridge.response",
         requestId: input.requestId,
         ok: input.ok,
         payload: input.payload,
@@ -121,86 +134,175 @@ export function SessionSidePanel(props: {
     )
   }
 
-  const onTasksMessage = (event: MessageEvent) => {
-    const frame = tasksFrame?.contentWindow
-    if (!frame || event.source !== frame) return
-    const origin = allowedOrigin()
-    if (origin && event.origin !== origin) return
-    if (!isTasksMessage(event.data)) return
-
-    const request = event.data
-
-    const toFilePath = (value?: string) => {
-      if (!value) return
-      const normalized = value.trim().replace(/\\/g, "/")
-      const withoutDot = normalized.replace(/^\.\//, "")
-      if (withoutDot.startsWith("/") || /^[A-Za-z]:\//.test(withoutDot)) {
-        const root = props.directory.replace(/\\/g, "/").replace(/\/+$/, "")
-        if (withoutDot.startsWith(`${root}/`)) return withoutDot.slice(root.length + 1)
-        return
-      }
-      return withoutDot
+  const resolveTabBySource = (source: MessageEventSource | null) => {
+    for (const [tab, frame] of frames.entries()) {
+      if (frame.contentWindow !== source) continue
+      const item = tabsByKey().get(tab)
+      if (item) return item
     }
+  }
 
-    if (request.action !== "file.read") {
-      postTasksResponse({
+  const audit = (input: { tab: string; action: string; path?: string; origin: string; ok: boolean }) => {
+    console.info("[plugin-bridge]", input)
+  }
+
+  const onWebviewMessage = (event: MessageEvent) => {
+    const tab = resolveTabBySource(event.source)
+    if (!tab) return
+    if (!isAllowedOrigin(event.origin, tab.origins)) {
+      audit({ tab: tab.tab, action: "unknown", origin: event.origin, ok: false })
+      return
+    }
+    if (!isRequest(event.data)) return
+    if (event.data.token !== tokenFor(tab.tab)) {
+      postResponse({
         source: event.source,
-        requestId: request.requestId,
+        requestId: event.data.requestId,
         ok: false,
-        error: "Action not supported by host bridge",
+        error: "Invalid bridge token",
       })
+      audit({ tab: tab.tab, action: event.data.action, origin: event.origin, ok: false })
       return
     }
 
-    const path = toFilePath(request.payload?.path)
-    if (!path) {
-      postTasksResponse({
+    const request = event.data
+    const path = normalizeBridgePath(props.directory, request.payload?.path ?? "")
+    const scopes = request.action === "file.write" ? tab.permissions.file.write : tab.permissions.file.read
+    if (!path || !inScopes(path, scopes)) {
+      postResponse({
         source: event.source,
         requestId: request.requestId,
         ok: false,
-        error: "Missing or invalid path",
+        error: "Path is not allowed by bridge policy",
       })
+      audit({ tab: tab.tab, action: request.action, path, origin: event.origin, ok: false })
+      return
+    }
+
+    if (request.action === "file.read") {
+      props.file
+        .load(path)
+        .then(() => {
+          const content = props.file.get(path)?.content?.content ?? ""
+          return hashText(content).then((hash) => ({ content, hash }))
+        })
+        .then((payload) => {
+          postResponse({
+            source: event.source,
+            requestId: request.requestId,
+            ok: true,
+            payload: {
+              path,
+              content: payload.content,
+              hash: payload.hash,
+            },
+          })
+          audit({ tab: tab.tab, action: request.action, path, origin: event.origin, ok: true })
+        })
+        .catch((error) => {
+          postResponse({
+            source: event.source,
+            requestId: request.requestId,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          audit({ tab: tab.tab, action: request.action, path, origin: event.origin, ok: false })
+        })
+      return
+    }
+
+    const content = typeof request.payload?.content === "string" ? request.payload.content : undefined
+    const expectedHash = typeof request.payload?.expectedHash === "string" ? request.payload.expectedHash : undefined
+    if (content === undefined || !expectedHash) {
+      postResponse({
+        source: event.source,
+        requestId: request.requestId,
+        ok: false,
+        error: "file.write requires content and expectedHash",
+      })
+      audit({ tab: tab.tab, action: request.action, path, origin: event.origin, ok: false })
       return
     }
 
     props.file
-      .load(path)
+      .load(path, { force: true })
       .then(() => {
-        const state = props.file.get(path)
-        const content = state?.content
-        if (!content) {
-          postTasksResponse({
+        const current = props.file.get(path)?.content?.content ?? ""
+        return hashText(current)
+      })
+      .then((currentHash) => {
+        if (currentHash !== expectedHash) {
+          postResponse({
             source: event.source,
             requestId: request.requestId,
             ok: false,
-            error: `Unable to read ${path}`,
+            error: "Hash mismatch. File changed since last read.",
+            payload: { path, hash: currentHash },
           })
+          audit({ tab: tab.tab, action: request.action, path, origin: event.origin, ok: false })
           return
         }
-        postTasksResponse({
-          source: event.source,
-          requestId: request.requestId,
-          ok: true,
-          payload: {
-            path,
-            content,
-          },
-        })
+
+        props.file
+          .write({ path, content })
+          .then((result) => {
+            postResponse({
+              source: event.source,
+              requestId: request.requestId,
+              ok: true,
+              payload: {
+                path: result.path,
+                hash: result.hash,
+              },
+            })
+            audit({ tab: tab.tab, action: request.action, path, origin: event.origin, ok: true })
+          })
+          .catch((error) => {
+            postResponse({
+              source: event.source,
+              requestId: request.requestId,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            audit({ tab: tab.tab, action: request.action, path, origin: event.origin, ok: false })
+          })
       })
       .catch((error) => {
-        postTasksResponse({
+        postResponse({
           source: event.source,
           requestId: request.requestId,
           ok: false,
           error: error instanceof Error ? error.message : String(error),
         })
+        audit({ tab: tab.tab, action: request.action, path, origin: event.origin, ok: false })
       })
-    return
+  }
+
+  const registerFrame = (tab: PluginWebTab, frame: HTMLIFrameElement) => {
+    frames.set(tab.tab, frame)
+    const token = tokenFor(tab.tab)
+    const origin = (() => {
+      try {
+        const next = new URL(tab.src).origin
+        if (next === "null") return "*"
+        return next
+      } catch {
+        return "*"
+      }
+    })()
+    frame.contentWindow?.postMessage(
+      {
+        type: "opencode.bridge.host",
+        tab: tab.tab,
+        token,
+      },
+      origin,
+    )
   }
 
   if (typeof window !== "undefined") {
-    window.addEventListener("message", onTasksMessage)
-    onCleanup(() => window.removeEventListener("message", onTasksMessage))
+    window.addEventListener("message", onWebviewMessage)
+    onCleanup(() => window.removeEventListener("message", onWebviewMessage))
   }
 
   return (
@@ -271,28 +373,32 @@ export function SessionSidePanel(props: {
                             </div>
                           </Tabs.Trigger>
                         </Show>
-                        <Show when={props.tasksUrl && props.tabs().all().includes(props.tasksTab)}>
-                          <Tabs.Trigger
-                            value={props.tasksTab}
-                            closeButton={
-                              <Tooltip value={props.language.t("common.closeTab")} placement="bottom">
-                                <IconButton
-                                  icon="close-small"
-                                  variant="ghost"
-                                  class="h-5 w-5"
-                                  onClick={() => props.tabs().close(props.tasksTab)}
-                                  aria-label={props.language.t("common.closeTab")}
-                                />
-                              </Tooltip>
-                            }
-                            hideCloseButton
-                            onMiddleClick={() => props.tabs().close(props.tasksTab)}
-                          >
-                            <div class="flex items-center gap-1.5">
-                              <div>Tasks</div>
-                            </div>
-                          </Tabs.Trigger>
-                        </Show>
+                        <For each={props.webTabs()}>
+                          {(tab) => (
+                            <Show when={props.tabs().all().includes(tab.tab)}>
+                              <Tabs.Trigger
+                                value={tab.tab}
+                                closeButton={
+                                  <Tooltip value={props.language.t("common.closeTab")} placement="bottom">
+                                    <IconButton
+                                      icon="close-small"
+                                      variant="ghost"
+                                      class="h-5 w-5"
+                                      onClick={() => props.tabs().close(tab.tab)}
+                                      aria-label={props.language.t("common.closeTab")}
+                                    />
+                                  </Tooltip>
+                                }
+                                hideCloseButton
+                                onMiddleClick={() => props.tabs().close(tab.tab)}
+                              >
+                                <div class="flex items-center gap-1.5">
+                                  <div>{tab.title}</div>
+                                </div>
+                              </Tabs.Trigger>
+                            </Show>
+                          )}
+                        </For>
                         <SortableProvider ids={props.openedTabs()}>
                           <For each={props.openedTabs()}>
                             {(tab) => <SortableTab tab={tab} onTabClose={props.tabs().close} />}
@@ -354,22 +460,33 @@ export function SessionSidePanel(props: {
                       </Tabs.Content>
                     </Show>
 
-                    <Show when={props.tasksUrl}>
-                      <Tabs.Content value={props.tasksTab} class="flex flex-col h-full overflow-hidden contain-strict">
-                        <Show when={props.activeTab() === props.tasksTab}>
-                          <iframe
-                            ref={(el) => {
-                              tasksFrame = el
-                            }}
-                            src={props.tasksUrl}
-                            class="h-full w-full border-0 bg-background-base"
-                            sandbox="allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin"
-                            referrerPolicy="no-referrer"
-                            title="Tasks roadmap"
-                          />
-                        </Show>
-                      </Tabs.Content>
-                    </Show>
+                    <For each={props.webTabs()}>
+                      {(tab) => {
+                        let frame: HTMLIFrameElement | undefined
+                        return (
+                          <Tabs.Content value={tab.tab} class="flex flex-col h-full overflow-hidden contain-strict">
+                            <Show when={props.activeTab() === tab.tab}>
+                              <iframe
+                                ref={(el) => {
+                                  frame = el
+                                  frames.set(tab.tab, el)
+                                  onCleanup(() => frames.delete(tab.tab))
+                                }}
+                                onLoad={() => {
+                                  if (!frame) return
+                                  registerFrame(tab, frame)
+                                }}
+                                src={tab.src}
+                                class="h-full w-full border-0 bg-background-base"
+                                sandbox="allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin"
+                                referrerPolicy="no-referrer"
+                                title={tab.title}
+                              />
+                            </Show>
+                          </Tabs.Content>
+                        )
+                      }}
+                    </For>
 
                     <Show when={props.activeFileTab()} keyed>
                       {(tab) => (
