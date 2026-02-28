@@ -133,6 +133,14 @@ bun run --cwd packages/desktop tauri dev
 
 This starts the web dev server on http://localhost:1420 and opens the native window.
 
+If desktop dev gets stuck on an infinite loading screen on macOS/Linux, run with a minimal shell:
+
+```bash
+SHELL=/bin/sh RUST_LOG=opencode_lib=debug bun run dev:desktop
+```
+
+This avoids interactive shell init hooks that can block sidecar startup.
+
 If you only want the web dev server (no native shell):
 
 ```bash
