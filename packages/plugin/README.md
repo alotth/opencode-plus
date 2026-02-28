@@ -56,20 +56,72 @@ export const ExamplePlugin: Plugin = async () => {
 
 ## Bridge
 
-Webviews communicate with the host via postMessage:
+Webviews communicate with the host through `postMessage` using a small request/response protocol.
 
-- host handshake: `opencode.bridge.host` (contains token)
-- request: `opencode.bridge.request`
-- response: `opencode.bridge.response`
+- handshake from host: `opencode.bridge.host` (includes token)
+- call from webview: `opencode.bridge.request`
+- reply from host: `opencode.bridge.response`
+- base actions: `file.read`, `file.write`
 
-Supported actions:
+`file.write` supports optimistic concurrency with `expectedHash`.
 
-- `file.read`
-- `file.write`
+Generic request shape:
 
-`file.write` uses optimistic concurrency with `expectedHash`.
+```ts
+window.parent.postMessage(
+  {
+    type: "opencode.bridge.request",
+    id: "req-1",
+    action: "file.read",
+    payload: { path: "README.md" },
+  },
+  "*",
+)
+```
 
-## Where to read more
+## Security model
 
-- Generic architecture and contract: `docs/plugin-webview-bridge.md`
-- Kanban/Roadmap implementation notes: `temp/markdown-kanban-roadmap/README.opencode-dashboard.md`
+Access is constrained by origin, token, allowed paths, and content hash checks.
+
+- `origin`: webview origin must match an allowed origin
+- `token`: each request must include the host-issued token
+- `path scope`: file actions are limited to explicitly allowed path patterns
+- `hash`: writes may require `expectedHash` to prevent stale updates
+
+Generic protected write:
+
+```ts
+window.parent.postMessage(
+  {
+    type: "opencode.bridge.request",
+    id: "req-2",
+    action: "file.write",
+    token: "<session-token>",
+    payload: {
+      path: "README.md",
+      content: "next content",
+      expectedHash: "<previous-hash>",
+    },
+  },
+  "*",
+)
+```
+
+## Serve assets
+
+Plugin webview assets are served from a stable host route.
+
+- route pattern: `/global/plugin/<plugin-id>/<asset-path>`
+- use that route for `src` and linked static files
+- keep plugin assets under your package and reference them by route
+
+Generic config example:
+
+```ts
+{
+  id: "panel",
+  title: "Panel",
+  src: "/global/plugin/<plugin-id>/index.html",
+  origins: ["*"],
+}
+```
